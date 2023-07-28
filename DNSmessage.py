@@ -57,7 +57,8 @@ RCODES = {
 
 # Modified from https://gist.github.com/mrpapercut/92422ecf06b5ab8e64e502da5e33b9f7
 # - Implemented as class 
-# - Further flexibility for different types of queries
+# - Further flexibility for different flags
+# - Support for PTR queries
 class DNSquery:
     def __init__(self, **kwargs):
         # 16-bit identifier (0-65535)
@@ -74,10 +75,10 @@ class DNSquery:
         self.RCODE = kwargs.get('RCODE', 0)     # Result                    4bit
 
         # 16-bit count section
-        self.QSTNCOUNT = kwargs.get('QSTNCOUNT', 1) # Number of questions           4bit
-        self.ANSRCOUNT = kwargs.get('ANSRCOUNT', 0) # Number of answers             4bit
-        self.AUTHCOUNT = kwargs.get('AUTHCOUNT', 0) # Number of authority records   4bit
-        self.ADDICOUNT = kwargs.get('ADDICOUNT', 0) # Number of additional records  4bit
+        self.QNCOUNT = kwargs.get('QNCOUNT', 1) # Number of questions           4bit
+        self.ANCOUNT = kwargs.get('ANCOUNT', 0) # Number of answers             4bit
+        self.NSCOUNT = kwargs.get('NSCOUNT', 0) # Number of authority records   4bit
+        self.ARCOUNT = kwargs.get('ARCOUNT', 0) # Number of additional records  4bit
 
         # query section
         self.QNAME = kwargs.get('QNAME', None) # Name to lookup
@@ -86,7 +87,7 @@ class DNSquery:
     
     def init_from_raw(self, raw_query):
         """Decode a DNS protocol header"""
-        self.ID, flags, self.QSTNCOUNT, self.ANSRCOUNT, self.AUTHCOUNT, self.ADDICOUNT = \
+        self.ID, flags, self.QNCOUNT, self.ANCOUNT, self.NSCOUNT, self.ARCOUNT = \
             struct.unpack('!HHHHHH', raw_query[:12])     # !: big-endian, H: unsigned short (2 bytes)
 
         self.QR = (flags >> 15)
@@ -99,7 +100,7 @@ class DNSquery:
         self.AD = (flags >> 5) & 0x1
         self.CD = (flags >> 4) & 0x1
         self.RCODE = (flags) & 0xf
-        # print(self.ID, self.QR, self.OPCODE, self.AA, self.TC, self.RD, self.RA, self.Z, self.AD, self.CD, self.RCODE, self.QSTNCOUNT, self.ANSRCOUNT, self.AUTHCOUNT, self.ADDICOUNT)
+        # print(self.ID, self.QR, self.OPCODE, self.AA, self.TC, self.RD, self.RA, self.Z, self.AD, self.CD, self.RCODE, self.QNCOUNT, self.ANCOUNT, self.NSCOUNT, self.ARCOUNT)
 
         question = raw_query[12:]
         self.QNAME, self.QTYPE, self.QCLASS = self.decode_question(question)
@@ -141,6 +142,10 @@ class DNSquery:
 
         addr_parts = self.QNAME.split(".")
         addr_parts = list(filter(lambda x: x != '', addr_parts)) # remove empty strings (for trailing '.', or root domain)
+        
+        if self.QTYPE == 'PTR':
+            addr_parts.reverse()
+            addr_parts += ['in-addr', 'arpa']
 
         for part in addr_parts:
             addr_len = "{:02x}".format(len(part))
@@ -158,10 +163,10 @@ class DNSquery:
         '''
         message = "{:04x}".format(self.ID)
         message += self.get_flags_as_hexstring()
-        message += "{:04x}".format(self.QSTNCOUNT)
-        message += "{:04x}".format(self.ANSRCOUNT)
-        message += "{:04x}".format(self.AUTHCOUNT)
-        message += "{:04x}".format(self.ADDICOUNT)
+        message += "{:04x}".format(self.QNCOUNT)
+        message += "{:04x}".format(self.ANCOUNT)
+        message += "{:04x}".format(self.NSCOUNT)
+        message += "{:04x}".format(self.ARCOUNT)
         message += self.get_name_as_hexstring()
         message += self.get_type_as_hexstring()
         message += "{:04x}".format(self.QCLASS)
