@@ -5,9 +5,11 @@ import struct
 import socket
 
 RECORD_TYPES = {
+    # 0: "RESERVED",
     1: "A",
     2: "NS",
     5: "CNAME",
+    6: "SOA",
     12: "PTR",
     15: "MX"
 }
@@ -20,14 +22,28 @@ RECORD_CLASSES ={
     # 255: "*"
 }
 
-# DNS Response Codes
+# DNS Response Codes (Bijective?)
 RCODES = {
-    "NOERROR": 0,
-    "FORMERR": 1,
-    "SERVFAIL": 2,
-    "NXDOMAIN": 3,
-    "NOTIMPL": 4,
-    "REFUSED": 5,
+    0: "NOERROR",
+    1: "FORMERR",
+    2: "SERVFAIL",
+    3: "NXDOMAIN",
+    4: "NOTIMPL",
+    5: "REFUSED",
+    9: "NOTAUTH",
+    16: "BADVERS",
+    17: "BADKEY",
+    18: "BADTIME",
+    19: "BADMODE",
+    20: "BADNAME",
+    21: "BADALG",
+    22: "BADTRUNC",
+    23: "BADCOOKIE"
+    # "FORMERR": 1,
+    # "SERVFAIL": 2,
+    # "NXDOMAIN": 3,
+    # "NOTIMPL": 4,
+    # "REFUSED": 5,
     # "NOTAUTH": 9,
     # "BADVERS": 16,
     # "BADKEY": 17,
@@ -45,7 +61,7 @@ RCODES = {
 class DNSquery:
     def __init__(self, **kwargs):
         # 16-bit identifier (0-65535)
-        self.ID = kwargs.get('ID', random.randint(0, 65535))
+        self.ID = kwargs.get('ID', random.randint(0x0000, 0xffff))
 
         # 16-bit flag section
         self.QR = kwargs.get('QR', 0)           # Query: 0, Response: 1     1bit
@@ -64,9 +80,38 @@ class DNSquery:
         self.ADDICOUNT = kwargs.get('ADDICOUNT', 0) # Number of additional records  4bit
 
         # query section
-        self.QNAME = kwargs.get('QNAME', None) # URL to lookup
+        self.QNAME = kwargs.get('QNAME', None) # Name to lookup
         self.QTYPE = kwargs.get('QTYPE', None) # Type of request e.g. 'A', 'NS'
-        self.QCLASS = kwargs.get('QCLASS', 1)  # Class for lookup. 1 is Internet
+        self.QCLASS = kwargs.get('QCLASS', 1)  # Class for lookup. 1 is Internet (IN)
+    
+    def init_from_raw(self, raw_query):
+        """Decode a DNS protocol header"""
+        self.ID, flags, self.QSTNCOUNT, self.ANSRCOUNT, self.AUTHCOUNT, self.ADDICOUNT = \
+            struct.unpack('!HHHHHH', raw_query[:12])     # !: big-endian, H: unsigned short (2 bytes)
+
+        self.QR = (flags >> 15)
+        self.OPCODE = (flags >> 11) & 0xf
+        self.AA = (flags >> 10) & 0x1
+        self.TC = (flags >> 9) & 0x1
+        self.RD = (flags >> 8) & 0x1
+        self.RA = (flags >> 7) & 0x1
+        self.Z = (flags >> 6) & 0x1
+        self.AD = (flags >> 5) & 0x1
+        self.CD = (flags >> 4) & 0x1
+        self.RCODE = (flags) & 0xf
+        # print(self.ID, self.QR, self.OPCODE, self.AA, self.TC, self.RD, self.RA, self.Z, self.AD, self.CD, self.RCODE, self.QSTNCOUNT, self.ANSRCOUNT, self.AUTHCOUNT, self.ADDICOUNT)
+
+        question = raw_query[12:]
+        self.QNAME, self.QTYPE, self.QCLASS = self.decode_question(question)
+        # print(self.QNAME, self.QTYPE, self.QCLASS)
+
+    def decode_question(self, question):
+        """decode question section of a DNS message"""
+        name, offset = self.name_from_wire_message(question, 0)
+        qtype, qclass = struct.unpack("!HH", question[offset:offset+4])
+        qtype = RECORD_TYPES[qtype] if qtype in RECORD_TYPES else str(qtype) + "??"
+        # qclass = RECORD_CLASSES[qclass] if qclass in RECORD_CLASSES else str(qclass) + "??"
+        return (name, qtype, qclass)
     
     def get_type_as_hexstring(self):
         TYPES = {
@@ -89,9 +134,14 @@ class DNSquery:
         return flags
     
     def get_name_as_hexstring(self):
+        '''
+        Return QNAME as hexstring. QNAME is url split up by '.', preceded by 8 bit int indicating length of part.
+        '''
         name = ""
-        # QNAME is url split up by '.', preceded by 8 bit? int indicating length of part
+
         addr_parts = self.QNAME.split(".")
+        addr_parts = list(filter(lambda x: x != '', addr_parts)) # remove empty strings (for trailing '.', or root domain)
+
         for part in addr_parts:
             addr_len = "{:02x}".format(len(part))
             addr_part = binascii.hexlify(part.encode())
@@ -115,133 +165,107 @@ class DNSquery:
         message += self.get_name_as_hexstring()
         message += self.get_type_as_hexstring()
         message += "{:04x}".format(self.QCLASS)
-        print(message)
         return bytes.fromhex(message)
     
-    def decode_message(self, message):
-        message = binascii.hexlify(message).decode()
-        res = []
-        
-        ID              = message[0:4]
-        query_params    = message[4:8]
-        QSTNCOUNT       = message[8:12]
-        ANSRCOUNT       = message[12:16]
-        AUTHCOUNT       = message[16:20]
-        ADDICOUNT       = message[20:24]
+    def __repr__(self):
+        return "<DNSquery: {},{},{}>".format(self.qname, self.qtype, self.qclass)
+    
+    def __str__(self):
+        return self.build_query()
+    
+    def name_from_wire_message(self, msg, offset):
+        """
+        Given wire format message, return a Name() object corresponding to the
+        domain name at given offset in the message.
+        """
+        labels, offset = self.get_name_labels(msg, offset, [])
+        return self.labels2text(labels), offset
 
-        params = "{:b}".format(int(query_params, 16)).zfill(16)
-        QPARAMS = OrderedDict([
-            ("QR", params[0:1]),
-            ("OPCODE", params[1:5]),
-            ("AA", params[5:6]),
-            ("TC", params[6:7]),
-            ("RD", params[7:8]),
-            ("RA", params[8:9]),
-            ("Z", params[9:12]),
-            ("RCODE", params[12:16])
-        ])
 
-        # Question section
-        QUESTION_SECTION_STARTS = 24
-        question_parts = self.parse_parts(message, QUESTION_SECTION_STARTS, [])
-        
-        QNAME = ".".join(map(lambda p: binascii.unhexlify(p).decode(), question_parts))    
+    def get_name_labels(self, msg, offset, compression_offsets):
 
-        QTYPE_STARTS = QUESTION_SECTION_STARTS + (len("".join(question_parts))) + (len(question_parts) * 2) + 2
-        QCLASS_STARTS = QTYPE_STARTS + 4
+        """
+        Decode domain name at given packet offset. compression_offsets is a list
+        of compression offsets seen so far. Returns list of domain name labels.
+        """
 
-        QTYPE = message[QTYPE_STARTS:QCLASS_STARTS]
-        QCLASS = message[QCLASS_STARTS:QCLASS_STARTS + 4]
-        
-        res.append("\n# HEADER")
-        res.append("ID: " + ID)
-        res.append("QUERYPARAMS: ")
-        for qp in QPARAMS:
-            res.append(" - " + qp + ": " + QPARAMS[qp])
-        res.append("\n# QUESTION SECTION")
-        res.append("QNAME: " + QNAME)
-        res.append("QTYPE: " + QTYPE + " (\"" + self.get_type_as_hexstring() + "\")")
-        res.append("QCLASS: " + QCLASS)
+        labellist = []
+        Done = False
+        while not Done:
+            llen, = struct.unpack('B', msg[offset:offset+1])
+            if (llen >> 6) == 0x3:                  # compression pointer starts with 2 1 bits, RFC1035 4.1.4
+                self.compression_count += 1         # perhaps redundant??
+                compression_offset = struct.unpack('!H', msg[offset:offset+2])[0] & 0x3fff
+                if compression_offset in compression_offsets:
+                    raise Exception('Compression pointer loop detected.')
+                compression_offsets.append(compression_offset)
+                offset += 2
+                rightmostlabels, _ = self.get_name_labels(msg, compression_offset, compression_offsets)
+                labellist += rightmostlabels
+                Done = True
+            else:
+                offset += 1
+                label = msg[offset:offset+llen]
+                offset += llen
+                labellist.append(label)
+                if llen == 0:
+                    Done = True
+        return (labellist, offset)
+    
+    def labels2text(self, labels):
+        """Return textual representation of domain name."""
+        name_parts = []
+        for label in labels:
+            part = ''
+            for c in label:
+                char = chr(c)
+                if c in b'.\\':
+                    part += ("\\" + char)
+                elif c > 32 and c < 127:            # printable ascii
+                    part += char
+                else:
+                    part += "\\{:03d}".format(c)    # as decimal (0-128)
+            name_parts.append(part)
 
-        # Answer section
-        ANSWER_SECTION_STARTS = QCLASS_STARTS + 4
-        
-        NUM_ANSWERS = max([int(ANSRCOUNT, 16), int(AUTHCOUNT, 16), int(ADDICOUNT, 16)])
-        if NUM_ANSWERS > 0:
-            res.append("\n# ANSWER SECTION")
-            
-            for ANSWER_COUNT in range(NUM_ANSWERS):
-                if (ANSWER_SECTION_STARTS < len(message)):
-                    ANAME = message[ANSWER_SECTION_STARTS:ANSWER_SECTION_STARTS + 4] # Refers to Question
-                    ATYPE = message[ANSWER_SECTION_STARTS + 4:ANSWER_SECTION_STARTS + 8]
-                    ACLASS = message[ANSWER_SECTION_STARTS + 8:ANSWER_SECTION_STARTS + 12]
-                    TTL = int(message[ANSWER_SECTION_STARTS + 12:ANSWER_SECTION_STARTS + 20], 16)
-                    RDLENGTH = int(message[ANSWER_SECTION_STARTS + 20:ANSWER_SECTION_STARTS + 24], 16)
-                    RDDATA = message[ANSWER_SECTION_STARTS + 24:ANSWER_SECTION_STARTS + 24 + (RDLENGTH * 2)]
+        if name_parts == ['']:
+            return "."
+        return ".".join(name_parts)
 
-                    if ATYPE == self.get_type_as_hexstring():
-                        octets = [RDDATA[i:i+2] for i in range(0, len(RDDATA), 2)]
-                        RDDATA_decoded = ".".join(list(map(lambda x: str(int(x, 16)), octets)))
-                    else:
-                        RDDATA_decoded = ".".join(map(lambda p: binascii.unhexlify(p).decode('iso8859-1'), self.parse_parts(RDDATA, 0, [])))
-                        
-                    ANSWER_SECTION_STARTS = ANSWER_SECTION_STARTS + 24 + (RDLENGTH * 2)
 
-                try: ATYPE
-                except NameError: None
-                else:  
-                    res.append("# ANSWER " + str(ANSWER_COUNT + 1))
-                    res.append("QSTNCOUNT: " + str(int(QSTNCOUNT, 16)))
-                    res.append("ANSRCOUNT: " + str(int(ANSRCOUNT, 16)))
-                    res.append("AUTHCOUNT: " + str(int(AUTHCOUNT, 16)))
-                    res.append("ADDICOUNT: " + str(int(ADDICOUNT, 16)))
-                    
-                    res.append("ANAME: " + ANAME)
-                    res.append("ATYPE: " + ATYPE + " (\"" + self.get_type_as_hexstring() + "\")")
-                    res.append("ACLASS: " + ACLASS)
-                    
-                    res.append("\nTTL: " + str(TTL))
-                    res.append("RDLENGTH: " + str(RDLENGTH))
-                    res.append("RDDATA: " + RDDATA)
-                    res.append("RDDATA decoded (result): " + RDDATA_decoded + "\n")
-
-        return "\n".join(res)
-
-    def parse_parts(self, message, start, parts):
-        part_start = start + 2
-        part_len = message[start:part_start]
-        
-        if len(part_len) == 0:
-            return parts
-        
-        part_end = part_start + (int(part_len, 16) * 2)
-        parts.append(message[part_start:part_end])
-
-        if message[part_end:part_end + 2] == "00" or part_end > len(message):
-            return parts
-        else:
-            return self.parse_parts(message, part_end, parts)
     
 # Modified from https://github.com/shuque/pydig/blob/master/pydiglib/dnsmsg.py
 # - Simplified for subset of RR types and classes
 #   - A, NS, CNAME, MX, PTR
+# - Aligned formatting
 # - Support for compression added manually (i.e. interpreting pointer-compressed responses)
+# - Designated fields for captured resource records
 class DNSresponse:
     """DNS Response class"""
 
     sections = ["QUESTION", "ANSWER", "AUTHORITY", "ADDITIONAL"]
+
+    # the following are set within set_response_str()
     compression_count = 0
+    response_str = ''
+    matches_question = False
+    records = {
+        'ANSWER': [],
+        'AUTHORITY': [],
+        'ADDITIONAL': []
+    }
+
 
     def __init__(self, query, msg, checkid=True):
         self.query = query              # original DNSquery object
-        self.message = msg
+        self.message = msg              # byte response
         self.msglen = len(self.message)
         self.decode_header(checkid)
+        self.set_response_str()
 
     def decode_header(self, checkid=True):
         """Decode a DNS protocol header"""
         self.id, flags, self.qdcount, self.ancount, self.nscount, self.arcount = \
-            struct.unpack('!HHHHHH', self.message[:12])
+            struct.unpack('!HHHHHH', self.message[:12])     # !: big-endian, H: unsigned short (2 bytes)
         if checkid and (self.id != self.query.ID):
             # Should continue listening for a valid response here (ideally)
             raise Exception("got response with id: %ld (expecting %ld)" %
@@ -257,11 +281,17 @@ class DNSresponse:
         self.cd = (flags >> 4) & 0x1
         self.rcode = (flags) & 0xf
 
+    def append_to_response_str(self, str, print=False):
+        if print:
+            print(str)
+        else:
+            self.response_str += str + "\n"
+
     def print_preamble(self):
         """Print preamble of a DNS response message"""
-        print(";; rcode=%d(%s), id=%d" %
+        self.append_to_response_str(";; rcode=%d(%s), id=%d" %
               (self.rcode, RCODES[self.rcode], self.id))
-        print(";; qr=%d opcode=%d aa=%d tc=%d rd=%d ra=%d z=%d ad=%d cd=%d" %
+        self.append_to_response_str(";; qr=%d opcode=%d aa=%d tc=%d rd=%d ra=%d z=%d ad=%d cd=%d" %
               (self.qr,
                self.opcode,
                self.aa,
@@ -271,19 +301,21 @@ class DNSresponse:
                self.z,
                self.ad,
                self.cd))
-        print(";; question=%d, answer=%d, authority=%d, additional=%d" %
+        self.append_to_response_str(";; question=%d, answer=%d, authority=%d, additional=%d" %
               (self.qdcount, self.ancount, self.nscount, self.arcount))
-        print(";; Size response=%d with overhead 42" % (self.msglen))
+        self.append_to_response_str(";; Size: response=%d with overhead 42 (IPv4)" % (self.msglen))
 
     def print_rr(self, rrname, ttl, rrtype, rrclass, rdata):
         """Print RR in presentation format"""
-        print("%s\t%d\t%s\t%s\t%s" %
-              (rrname.text(), ttl, RECORD_CLASSES[rrclass], RECORD_TYPES[rrtype], rdata))
+        rrclass_str = RECORD_CLASSES[rrclass] if rrclass in RECORD_CLASSES else str(rrclass) + "??"
+        rrtype_str = RECORD_TYPES[rrtype] if rrtype in RECORD_TYPES else str(rrtype) + "??"
+
+        self.append_to_response_str(f"{rrname: <30}{ttl: <10}{rrclass_str: <5}{rrtype_str: <10}{rdata}")
         return
 
     def decode_question(self, offset):
         """decode question section of a DNS message"""
-        domainname, offset = name_from_wire_message(self.message, offset)
+        domainname, offset = self.name_from_wire_message(self.message, offset)
         rrtype, rrclass = struct.unpack("!HH", self.message[offset:offset+4])
         offset += 4
         return (domainname, rrtype, rrclass, offset)
@@ -292,12 +324,13 @@ class DNSresponse:
         """Check that answer matches question"""
         if self.rcode in [0, 3]:
             if (qname.lower() == self.query.QNAME.lower()) \
-                or (qtype != self.query.QTYPE) \
-                or (qclass != self.query.QCLASS):
-                print("*** WARNING: Answer didn't match question!\n")
+                or (qname.lower() == self.query.QNAME.lower() + ".") \
+                and (RECORD_TYPES[qtype] != self.query.QTYPE) \
+                and (qclass != self.query.QCLASS):
+                self.append_to_response_str("*** WARNING: Answer didn't match question!\n")
         return
     
-    def decode_rr(pkt, offset):
+    def decode_rr(self, pkt, offset, secname):
         """ Decode a resource record, given DNS packet and offset"""
         # data must be in bytes
 
@@ -306,18 +339,19 @@ class DNSresponse:
                 struct.unpack("!HHIH", pkt[offset:offset+10])
         offset += 10
         rdata = pkt[offset:offset+rdlen]
-        if rrtype == 1:                                          # A
-            rdata = socket.inet_ntop(socket.AF_INET, rdata)
-        elif rrtype in [2, 5, 12]:                               # NS, CNAME, PTR
-            rdata, _ = self.name_from_wire_message(pkt, offset)
-            rdata = rdata.text()
-        elif rrtype == 15:                                       # MX
-            mx_pref, = struct.unpack('!H', pkt[offset:offset+2])
-            rdata, _ = self.name_from_wire_message(pkt, offset+2)
-            rdata = "%d %s" % (mx_pref, rdata.text())
+        if rrtype == 1:                                             # A
+            rdata = socket.inet_ntop(socket.AF_INET, rdata)         # ipaddr
+        elif rrtype in [2, 5, 12]:                                  # NS, CNAME, PTR
+            rdata, _ = self.name_from_wire_message(pkt, offset)     # domain name
+        elif rrtype == 15:                                          # MX
+            mx_pri, = struct.unpack('!H', pkt[offset:offset+2])     # priority
+            rdata, _ = self.name_from_wire_message(pkt, offset+2)   # domain name
+            rdata = "%d %s" % (mx_pri, rdata)
         else:
-            raise Exception('Unknown resource record type %d.\nOnly A, NS, CNAME, PTR, MX supported.' % rrtype)
+            rdata = "??"
+            # raise Exception('Unknown resource record type %d.\nOnly A, NS, CNAME, PTR, MX supported.' % rrtype)
         offset += rdlen
+        self.records[secname].append((domainname, ttl, rrclass, rrtype, rdata))
         return (domainname, rrtype, rrclass, ttl, rdata, offset)
     
     def name_from_wire_message(self, msg, offset):
@@ -325,14 +359,14 @@ class DNSresponse:
         Given wire format message, return a Name() object corresponding to the
         domain name at given offset in the message.
         """
-        labels, offset = get_name_labels(self, msg, offset, [])
-        return Name(labels), offset
+        labels, offset = self.get_name_labels(msg, offset, [])
+        return self.labels2text(labels), offset
 
 
-    def get_name_labels(self, msg, offset, c_offset_list):
+    def get_name_labels(self, msg, offset, compression_offsets):
 
         """
-        Decode domain name at given packet offset. c_offset_list is a list
+        Decode domain name at given packet offset. compression_offsets is a list
         of compression offsets seen so far. Returns list of domain name labels.
         """
 
@@ -340,14 +374,14 @@ class DNSresponse:
         Done = False
         while not Done:
             llen, = struct.unpack('B', msg[offset:offset+1])
-            if (llen >> 6) == 0x3:                 # compression pointer, sec 4.1.4
-                self.compression_count += 1
-                c_offset = struct.unpack('!H', msg[offset:offset+2])[0] & 0x3fff
-                if c_offset in c_offset_list:
-                    raise Exception("Found compression pointer loop.")
-                c_offset_list.append(c_offset)
+            if (llen >> 6) == 0x3:                  # compression pointer starts with 2 1 bits, RFC1035 4.1.4
+                self.compression_count += 1         # perhaps redundant??
+                compression_offset = struct.unpack('!H', msg[offset:offset+2])[0] & 0x3fff
+                if compression_offset in compression_offsets:
+                    raise Exception('Compression pointer loop detected.')
+                compression_offsets.append(compression_offset)
                 offset += 2
-                rightmostlabels, _ = get_name_labels(msg, c_offset, c_offset_list)
+                rightmostlabels, _ = self.get_name_labels(msg, compression_offset, compression_offsets)
                 labellist += rightmostlabels
                 Done = True
             else:
@@ -359,47 +393,66 @@ class DNSresponse:
                     Done = True
         return (labellist, offset)
     
-    def name2text(self, labels):
+    def labels2text(self, labels):
         """Return textual representation of domain name."""
-        result_list = []
-
+        name_parts = []
         for label in labels:
-            result = bytes2escapedstring(label, backslash_label, printables_label)
-            result_list.append(result)
+            part = ''
+            for c in label:
+                char = chr(c)
+                if c in b'.\\':
+                    part += ("\\" + char)
+                elif c > 32 and c < 127:            # printable ascii
+                    part += char
+                else:
+                    part += "\\{:03d}".format(c)    # as decimal (0-128)
+            name_parts.append(part)
 
-        if result_list == ['']:
+        if name_parts == ['']:
             return "."
-        return ".".join(result_list)
-
-
+        return ".".join(name_parts)
 
     def decode_sections(self):
         """Decode message sections and print contents"""
-        offset = 12                     # skip over DNS header
+        offset = 12                     # skip over DNS header (12 bytes)
         answer_qname = None
 
         for (secname, rrcount) in zip(self.sections,
                                       [self.qdcount, self.ancount, self.nscount, self.arcount]):
-            print("\n;; %s SECTION:" % secname)
+            self.append_to_response_str("\n;; %s SECTION:" % secname)
             if secname == "QUESTION":
                 for _ in range(rrcount):
                     rrname, rrtype, rrclass, offset = \
                             self.decode_question(offset)
                     answer_qname = rrname
-                    print("%s\t%s\t%s" % (answer_qname.text(),
-                                          RECORD_CLASSES[rrclass],
-                                          RECORD_TYPES[rrtype]))
+                    rrclass_str = RECORD_CLASSES[rrclass] if rrclass in RECORD_CLASSES else str(rrclass) + "??"
+                    rrtype_str = RECORD_TYPES[rrtype] if rrtype in RECORD_TYPES else str(rrtype) + "??"
+                    self.append_to_response_str("%s\t%s\t%s" % (answer_qname,
+                                          rrclass_str,
+                                          rrtype_str))
                     self.question_matched(answer_qname, rrtype, rrclass)
             else:
                 for _ in range(rrcount):
-                    rrname, rrtype, rrclass, ttl, rdata, offset = decode_rr(self.message, offset)
+                    rrname, rrtype, rrclass, ttl, rdata, offset = self.decode_rr(self.message, offset, secname)
                     self.print_rr(rrname, ttl, rrtype, rrclass, rdata)
 
     def print_all(self):
         """Print all info about the DNS response message"""
         self.print_preamble()
         self.decode_sections()
+    
+    def set_response_str(self):
+        self.print_preamble()
+        self.decode_sections()
+
+        aa = 'Yes' if self.aa else 'No'
+        tc = 'Yes' if self.tc else 'No'
+        self.response_str += "\nAuthoritative (aa): " + aa + "\n"
+        self.response_str += "Truncated (tc): " + tc + "\n"
 
     def __repr__(self):
         return "<DNSresponse: {},{},{}>".format(
             self.query.QNAME, self.query.QTYPE, self.query.QCLASS)
+    
+    def __str__(self):
+        return self.response_str

@@ -7,7 +7,7 @@ import socket
 from datetime import datetime,date,timedelta
 from threading import Timer
 import re
-import DNSmessage
+from DNSmessage import DNSquery, DNSresponse
 
 '''
 TODO:
@@ -29,9 +29,6 @@ def parse_cmd_line(argv):
         usage_exit()
     if re.match("[0-9]{1,5}", argv[2]) is None:
         usage_exit()
-    # if int(argv[2]) < 1024 or int(argv[2]) > 65535:
-    #     print(f"error: port number must be in the range 1024-65535", file=sys.stderr)
-    #     usage_exit()
     if re.match("[a-zA-Z0-9\.\-]+", argv[3]) is None:
         usage_exit()
 
@@ -74,16 +71,22 @@ def request_resolver(resolver_ip, resolver_port, name, type, timeout_delta):
     
     addr = (resolver_ip, resolver_port)
     s.settimeout(timeout_delta)
-    query = DNSmessage.DNSquery(ID=91, QNAME=name, QTYPE=type)
+    query = DNSquery(QNAME=name, QTYPE=type)
     msg = query.build_query()
     s.sendto(msg, addr)
+
     try:
-        data, server = s.recvfrom(512)
-        response = dns_interpreter.decode_message(data)
-    except(socket.timeout):
+        data, server = s.recvfrom(1024)     # power of 2 greater than 512
+        dnsresponse = DNSresponse(query, data, checkid=True)
+        response = str(dnsresponse)
+    except socket.timeout:
         response = 'error: timeout'
-    except(socket.error):
+    except socket.error:
         response = 'error: socket error'
+    # except Exception:
+    #     response = 'error: unknown error'
+    # except Exception as e:
+    #     response = str(e)
     
     s.close()
     return response
