@@ -9,12 +9,11 @@ from threading import Timer
 import re
 from DNSmessage import DNSquery, DNSresponse
 
-'''
-TODO:
-- error message/handling for invalid name (if server can't find name)
-'''
 
 def parse_cmd_line(argv):
+    '''
+    Return cmd line args in correct format or exit with error message.
+    '''
     QTYPES = ('A', 'NS', 'MX', 'CNAME', 'PTR')
 
     def usage_exit():
@@ -57,14 +56,10 @@ def parse_cmd_line(argv):
     
     return resolver_ip, resolver_port, name, type, timeout
 
-def request_resolver(resolver_ip, resolver_port, name, type, timeout_delta):
+def query_resolver(resolver_ip, resolver_port, name, type, timeout_delta):
     '''
     Send DNS query to resolver, await response and return it
     '''
-    # hostname = socket.gethostname()
-    # print(hostname)
-    # udpclientip = socket.gethostbyname(hostname)
-    # print(udpclientip)
 
     s = socket.socket(socket.AF_INET,       # IPv4
                       socket.SOCK_DGRAM)    # UDP
@@ -76,22 +71,16 @@ def request_resolver(resolver_ip, resolver_port, name, type, timeout_delta):
     s.sendto(msg, addr)
 
     try:
-        data, server = s.recvfrom(1024)     # power of 2 greater than 512
+        data, _ = s.recvfrom(1024)     # power of 2 greater than 512
         dnsresponse = DNSresponse(query, data, checkid=True)
         response = str(dnsresponse)
-    except socket.timeout:
-        response = 'error: timeout'
-    except socket.error:
-        response = 'error: socket error'
-    # except Exception:
-    #     response = 'error: unknown error'
-    # except Exception as e:
-    #     response = str(e)
+    except Exception as e:
+        response = 'error: ' + str(e)
     
     s.close()
     return response
 
 if __name__ == '__main__':
     resolver_ip, resolver_port, name, type, timeout = parse_cmd_line(sys.argv)
-    response = request_resolver(resolver_ip, resolver_port, name, type, timeout)
+    response = query_resolver(resolver_ip, resolver_port, name, type, timeout)
     print(response)

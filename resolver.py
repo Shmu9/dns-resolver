@@ -2,13 +2,14 @@ import socket
 import sys
 import re
 from DNSmessage import DNSquery, DNSresponse
+from _thread import *
+import threading
 
 class Resolver():
 
     next_rootns = 0
 
-    def __init__(self, port, filename='named.root'):
-        self.port = port
+    def __init__(self, filename='named.root'):
         self.slist = []                             # search list (stack)
         self.sbelt = self.parse_conf(filename)      # (search) safety belt
         # self.cache = {}                             # cache (not implemented)
@@ -51,36 +52,54 @@ class Resolver():
                           socket.SOCK_DGRAM)    # UDP
 
         while True:
+            # exhaust search space for answer, or until RCODE error other than SERVFAIL is encountered
             servername = self.get_next_servername(look_in_sbelt=look_in_sbelt)
-            # print(f"servername: {servername}")
             if not servername:
                 raise Exception('No more servers to try.')
             if servername in already_tried:
                 continue
-            else:
-                already_tried.append(servername)
             
-            s.settimeout(1)
-            s.sendto(query.build_query(), (servername, 53))
+            resp = None
+            s.settimeout(1)   # over 50% larger than empirical average RTT to allow for variance
+            for i in range(2): # retry once otherwise move on to next name server
+                try:
+                    s.sendto(query.build_query(), (servername, 53))
+                    already_tried.append(servername)
+                    print('Sent query: ' + query.QNAME, query.QTYPE, query.QCLASS, 'to', servername)
 
-            data, server = s.recvfrom(1024)     # power of 2 greater than 512
+                    data, server = s.recvfrom(1024)                         # power of 2 greater than 512
+                    print('Received on response intake socket')
+                    # print('Received on response intake socket: %s' % data)
 
-            resp = DNSresponse(query, data, checkid=True)
+                    resp = DNSresponse(query, data, checkid=True)
+                    break
+                except:
+                    # timeout, socket error, or corrupted data -> try next server
+                    continue
+
+            if not resp: # possibly redundant
+                continue
+            
             if resp.ancount > 0:
-                # self.slist = []     # reset search list
-                # already_tried = []  # reset already tried
+                # answer found
                 s.close()
                 return resp
             elif resp.aa == 1:
-                # authoritative answer, but no desired record type
+                # authoritative response, but no actual answer
+                s.close()
+                return resp
+            elif resp.rcode not in [0, 2]:
+                # error code other than NOERROR or SERVFAIL
+                # -> exhaust search space for answer 
                 s.close()
                 return resp
             else:
                 for r in resp.records['AUTHORITY']:
-                    if r[3] == 2:  # NS record
-                        if r[4] not in self.slist:
-                            self.slist.append(r[4])             # NS name at index 4 (TODO: check if it's always the case; PTR records?)
-                # print(f"self.slist: {self.slist}")
+                    # if NS record, and NS name not in search list, and NS name not already tried
+                    if r[3] == 2 and \
+                       r[4] not in self.slist and \
+                       r[4] not in already_tried:
+                            self.slist.append(r[4])
                 
                 look_in_sbelt = False if self.slist else True   # if slist is empty, look in sbelt
 
@@ -98,21 +117,42 @@ def run(udp_ip, udp_port):
     print(f'UDP socket awaiting queries at {udp_ip}:{udp_port}')
     while True:
         data, addr = s.recvfrom(1024)   # power of 2 greater than 512
-        print('received message: %s' % data)
+        print('Received on query intake socket: %s' % data)
 
-        resolver = Resolver(53)
+        resolver = Resolver()
         query = DNSquery()
         try:
             query.init_from_raw(data)
             resp = resolver.resolve(query)  # attempt to resolve query
-            # print('\nresp.message: ')
-            # print(resp.message)
             s.sendto(resp.message, addr)
         except Exception as e:
-            # Corrupted or incorrect data, timeout, socket error, or no more servers to try 
-            # -> let client timeout by doing nothing
+            # No more servers to try
+            # THIS SHOULD NOT HAPPEN; an authoritative response (perhaps with no answer) 
+            # should always be found and sent back to client
+            # OR somehow the query is malformed/has the wrong ID (perhaps from an unintentional/malicious client connection)
+            # -> let unknown client timeout by doing nothing
+            # -> continue listening for queries
             print(f'error: {e}')
             continue
+
+# # https://www.geeksforgeeks.org/socket-programming-multi-threading-python/
+# def resolver_thread(s, data, addr):
+#     resolver = Resolver()
+#     query = DNSquery()
+#     try:
+#         query.init_from_raw(data)
+#         resp = resolver.resolve(query)  # attempt to resolve query
+#         s.sendto(resp.message, addr)
+#     except Exception as e:
+#         # No more servers to try
+#         # THIS SHOULD NOT HAPPEN; an authoritative response (perhaps with no answer) 
+#         # should always be found and sent back to client
+#         # OR somehow the query is malformed/has the wrong ID (perhaps from an unintentional/malicious client connection)
+#         # -> let unknown client timeout by doing nothing
+#         # -> continue listening for queries
+#         print(f'error: {e}')
+#         continue
+
 
 
 
