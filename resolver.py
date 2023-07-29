@@ -3,7 +3,6 @@ import sys
 import re
 from DNSmessage import DNSquery, DNSresponse
 from _thread import *
-import threading
 
 class Resolver():
 
@@ -119,39 +118,24 @@ def run(udp_ip, udp_port):
         data, addr = s.recvfrom(1024)   # power of 2 greater than 512
         print('Received on query intake socket: %s' % data)
 
-        resolver = Resolver()
-        query = DNSquery()
-        try:
-            query.init_from_raw(data)
-            resp = resolver.resolve(query)  # attempt to resolve query
-            s.sendto(resp.message, addr)
-        except Exception as e:
-            # No more servers to try
-            # THIS SHOULD NOT HAPPEN; an authoritative response (perhaps with no answer) 
-            # should always be found and sent back to client
-            # OR somehow the query is malformed/has the wrong ID (perhaps from an unintentional/malicious client connection)
-            # -> let unknown client timeout by doing nothing
-            # -> continue listening for queries
-            print(f'error: {e}')
-            continue
+        # Create new thread for each query
+        start_new_thread(resolver_thread, (s, data, addr))
 
-# # https://www.geeksforgeeks.org/socket-programming-multi-threading-python/
-# def resolver_thread(s, data, addr):
-#     resolver = Resolver()
-#     query = DNSquery()
-#     try:
-#         query.init_from_raw(data)
-#         resp = resolver.resolve(query)  # attempt to resolve query
-#         s.sendto(resp.message, addr)
-#     except Exception as e:
-#         # No more servers to try
-#         # THIS SHOULD NOT HAPPEN; an authoritative response (perhaps with no answer) 
-#         # should always be found and sent back to client
-#         # OR somehow the query is malformed/has the wrong ID (perhaps from an unintentional/malicious client connection)
-#         # -> let unknown client timeout by doing nothing
-#         # -> continue listening for queries
-#         print(f'error: {e}')
-#         continue
+def resolver_thread(s, data, addr):
+    resolver = Resolver()
+    query = DNSquery()
+    try:
+        query.init_from_raw(data)
+        resp = resolver.resolve(query)  # attempt to resolve query
+        s.sendto(resp.message, addr)
+    except Exception as e:
+        # No more servers to try
+        # THIS SHOULD NOT HAPPEN; an authoritative response (perhaps with no answer) 
+        # should always be found and sent back to client
+        # OR somehow the query is malformed/has the wrong ID (perhaps from an unintentional/malicious client connection)
+        # -> let unknown client timeout by doing nothing
+        # -> continue listening for queries
+        print(f'error: {e}')
 
 
 
